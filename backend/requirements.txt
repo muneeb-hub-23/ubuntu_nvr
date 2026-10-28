@@ -1,0 +1,6 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+cryptography==44.0.3
+onvif-zeep==0.2.12
+ntplib==0.4.0
+tzdata==2025.2

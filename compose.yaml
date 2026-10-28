@@ -1,0 +1,29 @@
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "${NVR_PORT:-3000}:3000"
+    environment:
+      NVR_USER: ${NVR_USER:?Set NVR_USER in .env}
+      NVR_PASSWORD: ${NVR_PASSWORD:?Set NVR_PASSWORD in .env}
+      NVR_SECRET: ${NVR_SECRET:?Set NVR_SECRET in .env}
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+  backend:
+    build: ./backend
+    environment:
+      NVR_SECRET: ${NVR_SECRET:?Set NVR_SECRET in .env}
+    volumes:
+      - nvr-data:/data
+    shm_size: 256mb
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+volumes:
+  nvr-data:
