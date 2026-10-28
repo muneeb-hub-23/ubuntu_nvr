@@ -23,7 +23,12 @@ class APITest(unittest.TestCase):
         self.client.headers['x-nvr-key'] = os.environ['NVR_SECRET']
         main.db.execute('DELETE FROM cameras')
         main.db.execute('DELETE FROM settings')
+        main.db.execute('DELETE FROM sessions')
+        main.db.execute('UPDATE users SET password=?,must_change=0 WHERE username=?', (main.hash_password('admin'),'admin'))
         main.db.commit()
+        main.login_attempts.clear()
+        token = self.client.post('/auth/login',json={'username':'admin','password':'admin'}).json()['token']
+        self.client.headers['x-nvr-session'] = token
         main.desired.clear()
         main.workers.clear()
 
@@ -37,6 +42,39 @@ class APITest(unittest.TestCase):
         self.assertEqual(TestClient(main.app).get('/cameras').status_code, 401)
         self.assertEqual(TestClient(main.app).get('/health').status_code, 200)
         self.assertEqual(self.client.post('/cameras', headers={'sec-fetch-site':'cross-site'}, json={}).status_code, 403)
+        self.assertEqual(TestClient(main.app).get('/cameras',headers={'x-nvr-key':os.environ['NVR_SECRET']}).status_code,401)
+
+    def test_initial_login_password_change_and_logout(self):
+        main.db.execute('UPDATE users SET must_change=1')
+        main.db.commit()
+        self.assertEqual(self.client.post('/auth/login',json={'username':'admin','password':'wrong'}).status_code,401)
+        response = self.client.post('/auth/login',json={'username':'admin','password':'admin'})
+        self.assertTrue(response.json()['must_change'])
+        old_token = response.json()['token']
+        self.client.headers['x-nvr-session'] = old_token
+        self.assertEqual(self.client.get('/cameras').status_code,403)
+        self.assertEqual(self.client.post('/auth/password',json={'current_password':'wrong','new_password':'a-better-password'}).status_code,400)
+        self.assertEqual(self.client.post('/auth/password',json={'current_password':'admin','new_password':'short'}).status_code,422)
+        response = self.client.post('/auth/password',json={'current_password':'admin','new_password':'a-better-password'})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(self.client.get('/auth/me').status_code,401)
+        self.client.headers['x-nvr-session'] = response.json()['token']
+        self.assertEqual(self.client.get('/cameras').status_code,200)
+        self.assertFalse(self.client.get('/auth/me').json()['must_change'])
+        self.assertEqual(self.client.post('/auth/login',json={'username':'admin','password':'admin'}).status_code,401)
+        stored = main.db.execute('SELECT password FROM users WHERE username=?',('admin',)).fetchone()[0]
+        self.assertNotIn('a-better-password',stored)
+        self.client.post('/auth/logout')
+        self.assertEqual(self.client.get('/cameras').status_code,401)
+
+    def test_expiration_and_login_rate_limit(self):
+        main.db.execute('UPDATE sessions SET expires=0')
+        main.db.commit()
+        self.assertEqual(self.client.get('/auth/me').status_code,401)
+        main.login_attempts.clear()
+        for _ in range(10):
+            self.assertEqual(self.client.post('/auth/login',json={'username':'admin','password':'wrong'}).status_code,401)
+        self.assertEqual(self.client.post('/auth/login',json={'username':'admin','password':'admin'}).status_code,429)
 
     def test_crud_encryption_and_preserved_password(self):
         c = self.add()

@@ -4,8 +4,7 @@ services:
     ports:
       - "${NVR_PORT:-3000}:3000"
     environment:
-      NVR_USER: ${NVR_USER:?Set NVR_USER in .env}
-      NVR_PASSWORD: ${NVR_PASSWORD:?Set NVR_PASSWORD in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       NVR_SECRET: ${NVR_SECRET:?Set NVR_SECRET in .env}
       BACKEND_URL: http://backend:8000
     depends_on:

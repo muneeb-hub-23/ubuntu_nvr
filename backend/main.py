@@ -12,6 +12,8 @@ import subprocess
 import time
 import threading
 import uuid
+import secrets
+from collections import deque
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -30,7 +32,31 @@ cipher = Fernet(base64.urlsafe_b64encode(hashlib.sha256(SECRET.encode()).digest(
 db = sqlite3.connect(DATA / 'nvr.db', check_same_thread=False)
 db.execute('CREATE TABLE IF NOT EXISTS cameras (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
 db.execute('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+db.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL, must_change INTEGER NOT NULL)')
+db.execute('CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT NOT NULL, expires REAL NOT NULL)')
+
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
+    return salt + ':' + digest
+
+def verify_password(password, stored):
+    return hmac.compare_digest(hash_password(password, stored.split(':')[0]), stored)
+
+db.execute('INSERT OR IGNORE INTO users VALUES (?,?,1)', ('admin', hash_password('admin')))
 db.commit()
+login_attempts = deque()
+auth_lock = threading.RLock()
+
+def session_user(token):
+    return db.execute('SELECT users.username, users.must_change FROM sessions JOIN users ON sessions.username=users.username WHERE sessions.token=? AND sessions.expires>?', (hashlib.sha256(token.encode()).hexdigest(), time.time())).fetchone()
+
+def new_session(username):
+    token = secrets.token_urlsafe(32)
+    db.execute('DELETE FROM sessions WHERE expires<=?', (time.time(),))
+    db.execute('INSERT INTO sessions VALUES (?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), username, time.time()+43200))
+    db.commit()
+    return token
 workers = {}
 desired = set()
 worker_lock = threading.RLock()
@@ -86,7 +112,63 @@ async def auth(request: Request, call_next):
         return JSONResponse({'detail': 'Unauthorized'}, status_code=401)
     if request.method in ('POST', 'PUT', 'DELETE') and request.headers.get('sec-fetch-site') == 'cross-site':
         return JSONResponse({'detail': 'Cross-site request rejected'}, status_code=403)
+    if request.url.path not in ('/health', '/auth/login'):
+        user = session_user(request.headers.get('x-nvr-session', ''))
+        if not user:
+            return JSONResponse({'detail': 'Please sign in'}, status_code=401)
+        request.state.user = user
+        if user[1] and not request.url.path.startswith('/auth/'):
+            return JSONResponse({'detail': 'Change your initial password before using the recorder'}, status_code=403)
     return await call_next(request)
+
+class Login(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=500)
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=500)
+    new_password: str = Field(min_length=10, max_length=500)
+
+@app.post('/auth/login')
+def login(body: Login):
+    with auth_lock:
+        now = time.time()
+        while login_attempts and login_attempts[0] < now-60:
+            login_attempts.popleft()
+        if len(login_attempts) >= 10:
+            raise HTTPException(429, 'Too many login attempts. Try again in one minute.')
+        login_attempts.append(now)
+        row = db.execute('SELECT password,must_change FROM users WHERE username=?', (body.username,)).fetchone()
+        dummy = db.execute('SELECT password FROM users WHERE username=?', ('admin',)).fetchone()[0]
+        valid = verify_password(body.password, row[0] if row else dummy)
+        if not row or not valid:
+            raise HTTPException(401, 'Incorrect username or password')
+        return {'token': new_session(body.username), 'username': body.username, 'must_change': bool(row[1])}
+
+@app.get('/auth/me')
+def me(request: Request):
+    return {'username': request.state.user[0], 'must_change': bool(request.state.user[1])}
+
+@app.post('/auth/logout')
+def logout(request: Request):
+    with auth_lock:
+        db.execute('DELETE FROM sessions WHERE token=?', (hashlib.sha256(request.headers.get('x-nvr-session', '').encode()).hexdigest(),))
+        db.commit()
+    return {'ok': True}
+
+@app.post('/auth/password')
+def change_password(body: PasswordChange, request: Request):
+    with auth_lock:
+        username = request.state.user[0]
+        stored = db.execute('SELECT password FROM users WHERE username=?', (username,)).fetchone()[0]
+        if not verify_password(body.current_password, stored):
+            raise HTTPException(400, 'Current password is incorrect')
+        if verify_password(body.new_password, stored):
+            raise HTTPException(422, 'Choose a different password')
+        db.execute('UPDATE users SET password=?,must_change=0 WHERE username=?', (hash_password(body.new_password), username))
+        db.execute('DELETE FROM sessions WHERE username=?', (username,))
+        db.commit()
+        return {'token': new_session(username), 'username': username, 'must_change': False}
 
 class Camera(BaseModel):
     name: str = Field(min_length=1, max_length=100)

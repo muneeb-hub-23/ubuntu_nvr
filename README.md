@@ -8,12 +8,12 @@ Requirements: Docker Engine with Compose v2 (or Docker Desktop), access from Doc
 
 ```sh
 cp .env.example .env
-# Edit .env: set NVR_USER, a strong NVR_PASSWORD and a random NVR_SECRET.
+# Edit .env: set a random NVR_SECRET.
 # Generate a secret with: openssl rand -hex 32
 docker compose up -d --build
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env`. Open **http://localhost:3000** (or your server IP) and sign in using `NVR_USER` / `NVR_PASSWORD`. Browser HTTP Basic authentication protects the interface and API. Use an HTTPS reverse proxy for remote access; deploy on a trusted LAN and do not expose port 3000 directly to the internet. Only the frontend is published; the backend is on the private Compose network.
+On Windows PowerShell, use `Copy-Item .env.example .env`. Open **http://localhost:3000** (or your server IP) and sign in with **admin / admin** on the first installation. You must choose a new password (at least 10 characters) before accessing cameras. Passwords are salted and hashed with scrypt. Authentication uses server-side sessions and HttpOnly, SameSite cookies with a 12-hour lifetime. Sign out revokes the session; changing your password revokes all previous sessions. Use **Account** to change your password later. Login attempts are rate limited. Set `COOKIE_SECURE=true` when serving over HTTPS. Use an HTTPS reverse proxy for remote access; deploy on a trusted LAN and do not expose port 3000 directly to the internet. Only the frontend is published; the backend is on the private Compose network.
 
 ```sh
 docker compose logs -f
@@ -59,7 +59,7 @@ cd frontend
 npm ci
 npm run typecheck
 npm run build
-# Set NVR_USER, NVR_PASSWORD, NVR_SECRET, BACKEND_URL before npm run dev
+# Set NVR_SECRET, BACKEND_URL before npm run dev
 ```
 
 ```sh
@@ -70,6 +70,8 @@ python -m unittest -v test_api
 uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-API tests cover authentication, camera CRUD, encrypted password handling, stream process lifecycle, recording arguments, and clock validation. FFmpeg process creation is mocked in tests. Actual camera/ONVIF compatibility, media playback, and Docker networking require testing on your target server with real hardware.
+API tests cover default login, required password change, session revocation/expiration, login rate limits, camera CRUD, encrypted password handling, stream process lifecycle, recording arguments, and clock validation. After building the frontend, run `python scripts/smoke_frontend.py` from the repository root (with backend dependencies installed) for an integrated authentication check, including cookie handling and backend restart persistence. FFmpeg process creation is mocked in API tests. Actual camera/ONVIF compatibility, media playback, and Docker networking require testing on your target server with real hardware.
+
+The admin account is initialized only when it does not exist. Rebuilds and restarts preserve its changed password in the `nvr-data` volume. The previous `NVR_USER` and `NVR_PASSWORD` environment settings are no longer used.
 
 If a stream does not connect, verify its URL in VLC on the Docker host, confirm the stream path and ONVIF port, check credentials and camera connection limits, then retry. ONVIF discovery across subnets is not required: the supplied address is used directly. HTTPS cameras need a certificate trusted by the container. A browser cannot play RTSP directly; FFmpeg performs the conversion ([protocol documentation](https://ffmpeg.org/ffmpeg-protocols.html)). Next.js request protection uses its [Proxy convention](https://nextjs.org/docs/app/api-reference/file-conventions/proxy).

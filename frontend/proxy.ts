@@ -1,16 +1,17 @@
 import {NextRequest, NextResponse} from 'next/server';
-import {timingSafeEqual} from 'node:crypto';
-function same(a: string, b: string) {const x=Buffer.from(a); const y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y)}
-export function proxy(req: NextRequest) {
-  const user=process.env.NVR_USER, password=process.env.NVR_PASSWORD;
-  if(!user || !password) return new NextResponse('Configure NVR_USER and NVR_PASSWORD before starting.',{status:503});
-  const header=req.headers.get('authorization') || '';
-  let decoded=''; try {decoded=Buffer.from(header.startsWith('Basic ')?header.slice(6):'', 'base64').toString()} catch {}
-  if(!same(decoded, `${user}:${password}`)) return new NextResponse('Sign in to Luma NVR',{status:401,headers:{'WWW-Authenticate':'Basic realm="Luma NVR", charset="UTF-8"','Cache-Control':'no-store'}});
+export async function proxy(req: NextRequest) {
   if(['POST','PUT','DELETE'].includes(req.method)) {
     const origin=req.headers.get('origin');
     if(req.headers.get('sec-fetch-site')==='cross-site' || (origin && new URL(origin).host!==req.headers.get('host'))) return new NextResponse('Forbidden',{status:403});
   }
-  return NextResponse.next();
+  if(req.nextUrl.pathname.startsWith('/api/') || req.nextUrl.pathname==='/login') return NextResponse.next();
+  const token=req.cookies.get('nvr_session')?.value;
+  if(token) {
+    try {
+      const response=await fetch(`${process.env.BACKEND_URL || 'http://localhost:8000'}/auth/me`,{headers:{'x-nvr-key':process.env.NVR_SECRET || '', 'x-nvr-session':token}, cache:'no-store', signal:AbortSignal.timeout(5000)});
+      if(response.ok && !(await response.json()).must_change) return NextResponse.next();
+    } catch {return new NextResponse('Recorder unavailable. Please try again shortly.',{status:503})}
+  }
+  return NextResponse.redirect(new URL('/login',req.url));
 }
 export const config={matcher:['/((?!_next/static|_next/image|favicon.ico).*)']};
